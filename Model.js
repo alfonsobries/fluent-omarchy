@@ -35,18 +35,30 @@ function enabledActions(actions) {
   return out
 }
 
+// QML treats `.id` as reserved on objects, so the panel must never read
+// `action.id`. This helper runs in real JS where the JSON field is visible.
+function actionId(action) {
+  if (!action) return ""
+  if (action.actionId) return String(action.actionId)
+  if (action.id) return String(action.id)
+  return ""
+}
+
 function actionById(actions, id) {
+  var needle = String(id || "")
+  if (!needle) return null
   var list = Array.isArray(actions) ? actions : []
   for (var i = 0; i < list.length; i++) {
-    if (list[i] && list[i].id === id) return list[i]
+    if (actionId(list[i]) === needle) return list[i]
   }
   return null
 }
 
 function actionIndexById(actions, id) {
+  var needle = String(id || "")
   var list = Array.isArray(actions) ? actions : []
   for (var i = 0; i < list.length; i++) {
-    if (list[i] && list[i].id === id) return i
+    if (actionId(list[i]) === needle) return i
   }
   return -1
 }
@@ -80,6 +92,25 @@ function wrapIndex(index, length, delta) {
   if (next < 0) return length - 1
   if (next > length - 1) return 0
   return next
+}
+
+function promptPreview(prompt, maxLen) {
+  var limit = maxLen || 56
+  var text = String(prompt || "").replace(/\s+/g, " ").trim()
+  if (!text) return "No prompt yet"
+  if (text.length <= limit) return text
+  return text.slice(0, limit - 1) + "…"
+}
+
+function processingLabel(actionName) {
+  var name = String(actionName || "").toLowerCase()
+  if (name === "translate") return "Translating"
+  if (name === "improve writing") return "Improving"
+  if (name === "fix grammar") return "Fixing grammar"
+  if (name === "summarize") return "Summarizing"
+  if (name === "make professional") return "Rewriting"
+  if (name) return name.charAt(0).toUpperCase() + name.slice(1)
+  return "Working"
 }
 
 function heroTitle(snapshot) {

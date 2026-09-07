@@ -3,6 +3,7 @@ import QtQuick.Controls
 import QtQuick.Layouts
 import Quickshell
 import Quickshell.Io
+import Quickshell.Wayland
 import qs.Commons
 import qs.Ui
 import "Model.js" as Model
@@ -129,7 +130,8 @@ Panel {
 
   function runAction(actionId) {
     if (runProc.running) return
-    var action = Model.actionById(actions, actionId)
+    var id = String(actionId || "")
+    var action = Model.actionById(actions, id)
     if (!action) {
       errorMessage = "Unknown action."
       runState = "failed"
@@ -142,20 +144,18 @@ Panel {
       if (!opened) open()
       return
     }
-    runningId = action.id
+    runningId = Model.actionId(action)
     runningName = action.name
     errorMessage = ""
     _runStdout = ""
     _runStderr = ""
     runState = "processing"
-    runProc.command = [pythonBin, scriptPath, "run", "--action", action.id]
+    runProc.command = [pythonBin, scriptPath, "run", "--action", Model.actionId(action)]
     runProc.running = true
   }
 
   function runSelected() {
-    if (actions.length === 0) return
-    var action = actions[Math.max(0, Math.min(actionIndex, actions.length - 1))]
-    if (action) runAction(action.id)
+    startEdit()
   }
 
   function setProvider(id) {
@@ -188,7 +188,7 @@ Panel {
     editPrompt = ""
     editEnabled = true
     focusSection = "edit"
-    Qt.callLater(function() { nameField.forceActiveFocus(); nameField.selectAll() })
+    Qt.callLater(function() { if (promptField) promptField.forceActiveFocus() })
   }
 
   function startEdit() {
@@ -198,13 +198,21 @@ Panel {
     adding = false
     editing = true
     confirmRemove = false
-    editId = action.id
+    editId = Model.actionId(action)
     editName = action.name
     editKey = action.key || ""
     editPrompt = action.prompt || ""
     editEnabled = action.enabled !== false
     focusSection = "edit"
-    Qt.callLater(function() { nameField.forceActiveFocus(); nameField.selectAll() })
+    Qt.callLater(function() {
+      if (nameField) nameField.text = root.editName
+      if (keyLetterField) keyLetterField.text = root.editKey
+      if (promptField) {
+        promptField.text = root.editPrompt
+        promptField.forceActiveFocus()
+        promptField.cursorPosition = promptField.text.length
+      }
+    })
   }
 
   function cancelEdit() {
@@ -290,7 +298,7 @@ Panel {
 
   function activateCursor() {
     ensureCursor()
-    if (focusSection === "actions") runSelected()
+    if (focusSection === "actions") startEdit()
     else if (focusSection === "providers") {
       if (providerOptions.length > 0) setProvider(providerOptions[providerIndex].value)
     } else if (focusSection === "key") {
@@ -331,17 +339,12 @@ Panel {
   }
 
   function handleTextKey(t) {
-    if (editing) return
-    if (t === "n" || t === "N") { startAdd(); return }
+    if (editing || busy) return
     if (t === "e" || t === "E") { startEdit(); return }
-    if (t === "k" || t === "K") {
-      focusSection = "key"
-      keyField.forceActiveFocus()
-      return
-    }
-    if (t === "i" || t === "I") { installBinds(); return }
     var action = Model.actionByKey(actions, t)
-    if (action) runAction(action.id)
+    if (!action) return
+    var idx = Model.actionIndexById(actions, Model.actionId(action))
+    if (idx >= 0) setActionCursor(idx)
   }
 
   implicitWidth: button.implicitWidth
@@ -389,6 +392,54 @@ Panel {
     onPressed: function(buttonCode) {
       if (buttonCode === Qt.RightButton) root.refresh()
       else root.toggle()
+    }
+  }
+
+  PanelWindow {
+    id: workHud
+    visible: root.runState === "processing"
+    color: "transparent"
+    anchors { top: true; left: true; right: true }
+    implicitHeight: Style.bar.sizeHorizontal + Style.space(48)
+    exclusiveZone: 0
+    WlrLayershell.namespace: "fluent-hud"
+    WlrLayershell.layer: WlrLayer.Overlay
+    WlrLayershell.keyboardFocus: WlrKeyboardFocus.None
+    exclusionMode: ExclusionMode.Ignore
+    mask: Region {}
+
+    BorderSurface {
+      id: hudCard
+      anchors.horizontalCenter: parent.horizontalCenter
+      anchors.top: parent.top
+      anchors.topMargin: Style.bar.sizeHorizontal + Style.space(8)
+      color: Color.popups.background
+      borderSpec: Border.surfaceSpec("popups", "border", Color.popups.border, Math.max(1, Style.space(2)))
+      radius: Style.cornerRadius > 0 ? Style.cornerRadius : Style.space(10)
+      implicitWidth: hudRow.implicitWidth + Style.space(20)
+      implicitHeight: hudRow.implicitHeight + Style.space(14)
+
+      Row {
+        id: hudRow
+        anchors.centerIn: parent
+        spacing: Style.space(8)
+
+        FluentIcon {
+          anchors.verticalCenter: parent.verticalCenter
+          iconSize: Style.font.body
+          color: root.foreground
+          busy: true
+        }
+
+        Text {
+          anchors.verticalCenter: parent.verticalCenter
+          text: Model.processingLabel(root.runningName) + "…"
+          color: root.foreground
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.body
+          font.bold: true
+        }
+      }
     }
   }
 
@@ -517,19 +568,39 @@ Panel {
               font.pixelSize: Style.font.caption
             }
 
-            TextField {
-              id: promptField
+            Text {
               width: parent.width
-              placeholderText: "Prompt"
-              text: root.editPrompt
-              foreground: root.foreground
+              text: "PROMPT"
+              color: root.dim
               font.family: root.fontFamily
-              onTextChanged: root.editPrompt = text
-              Keys.onPressed: function(event) {
-                if (event.key === Qt.Key_Escape) { root.cancelEdit(); event.accepted = true }
-                if ((event.key === Qt.Key_Return || event.key === Qt.Key_Enter) && (event.modifiers & Qt.ControlModifier)) {
-                  root.saveEdit()
-                  event.accepted = true
+              font.pixelSize: Style.font.caption
+              font.letterSpacing: 1.2
+            }
+
+            BorderSurface {
+              width: parent.width
+              implicitHeight: Style.space(140)
+              color: "transparent"
+              borderSpec: Border.controlSpec(promptField.activeFocus ? "focus" : "normal", root.foreground, Color.accent)
+
+              TextArea {
+                id: promptField
+                anchors.fill: parent
+                anchors.margins: Style.space(8)
+                wrapMode: TextEdit.Wrap
+                text: root.editPrompt
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.body
+                placeholderText: "Instructions sent to the model with the selected text."
+                background: Item {}
+                onTextChanged: root.editPrompt = text
+                Keys.onPressed: function(event) {
+                  if (event.key === Qt.Key_Escape) { root.cancelEdit(); event.accepted = true }
+                  if ((event.key === Qt.Key_Return || event.key === Qt.Key_Enter) && (event.modifiers & Qt.ControlModifier)) {
+                    root.saveEdit()
+                    event.accepted = true
+                  }
                 }
               }
             }
@@ -588,6 +659,15 @@ Panel {
                 fontFamily: root.fontFamily
                 onClicked: root.startAdd()
               }
+            }
+
+            Text {
+              width: parent.width
+              text: "Shortcuts rewrite in place. Click an action to edit its prompt."
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              wrapMode: Text.WordWrap
             }
 
             Text {
@@ -874,8 +954,7 @@ Panel {
       onEntered: root.setActionCursor(actionRow.rowIndex)
       onClicked: function(mouse) {
         root.setActionCursor(actionRow.rowIndex)
-        if (mouse.button === Qt.RightButton) root.startEdit()
-        else if (actionRow.on) root.runAction(actionRow.action.id)
+        root.startEdit()
       }
     }
 
@@ -905,8 +984,7 @@ Panel {
         Text {
           textFormat: Text.PlainText
           Layout.fillWidth: true
-          visible: actionRow.action && actionRow.action.key
-          text: Model.formatHotkey(root.snapshot.hotkeyChord || "CTRL + ALT + SHIFT", actionRow.action ? actionRow.action.key : "")
+          text: Model.promptPreview(actionRow.action ? actionRow.action.prompt : "")
           color: root.dim
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption

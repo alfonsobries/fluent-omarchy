@@ -93,10 +93,22 @@ class ConfigTests(unittest.TestCase):
         cfg = fluent.default_config()
         cfg = fluent.upsert_action(cfg, {"id": "joke", "name": "Joke", "key": "J", "prompt": "Make it funny."})
         self.assertEqual(cfg["actions"][-1]["id"], "joke")
+        self.assertEqual(cfg["actions"][-1]["actionId"], "joke")
         cfg = fluent.delete_action(cfg, "joke")
         self.assertIsNone(fluent.find_action(cfg, "joke"))
         with self.assertRaises(fluent.FluentError):
             fluent.delete_action(cfg, "missing")
+
+    def test_empty_saved_actions_are_not_replaced_with_defaults(self):
+        cfg = fluent.normalize_config({"provider": "openai", "actions": []})
+        self.assertEqual(cfg["actions"], [])
+
+    def test_actionId_is_preferred_over_id(self):
+        cfg = fluent.normalize_config({
+            "actions": [{"id": "old", "actionId": "translate", "name": "Translate", "key": "T", "prompt": "p"}]
+        })
+        self.assertEqual(cfg["actions"][0]["id"], "translate")
+        self.assertEqual(fluent.find_action(cfg, "translate")["name"], "Translate")
 
 
 class HotkeyTests(unittest.TestCase):
@@ -165,7 +177,7 @@ class ClipboardTests(unittest.TestCase):
             calls.append(kwargs)
             return SimpleNamespace(returncode=0)
 
-        fluent.wl_copy("hello", runner=runner)
+        fluent.wl_copy("hello", runner=runner, binary="wl-copy")
         self.assertEqual(len(calls), 1)
         self.assertIs(calls[0]["stdout"], __import__("subprocess").DEVNULL)
         self.assertIs(calls[0]["stderr"], __import__("subprocess").DEVNULL)
@@ -177,11 +189,30 @@ class ClipboardTests(unittest.TestCase):
         def runner(*args, **kwargs):
             raise subprocess.TimeoutExpired(cmd="wl-copy", timeout=3)
 
-        fluent.wl_copy("hello", runner=runner)
+        fluent.wl_copy("hello", runner=runner, binary="wl-copy")
 
 
 class CaptureTests(unittest.TestCase):
-    def test_primary_selection_wins(self):
+    def test_clipboard_change_beats_stale_primary(self):
+        state = {"clip": "old", "primary": "stale"}
+
+        def paste(primary=False):
+            return state["primary"] if primary else state["clip"]
+
+        def shortcut(mods, key):
+            self.assertEqual((mods, key), ("CTRL", "C"))
+            state["clip"] = "fresh selection"
+
+        text = fluent.capture_selection(
+            delay=0,
+            sleeper=lambda _s: None,
+            paste=paste,
+            window_is_terminal=lambda: False,
+            shortcut=shortcut,
+        )
+        self.assertEqual(text, "fresh selection")
+
+    def test_primary_fallback_when_copy_does_not_change_clipboard(self):
         def paste(primary=False):
             return "highlighted" if primary else "clipboard"
 
@@ -190,7 +221,7 @@ class CaptureTests(unittest.TestCase):
             sleeper=lambda _s: None,
             paste=paste,
             window_is_terminal=lambda: False,
-            shortcut=lambda *_a: self.fail("should not send a shortcut"),
+            shortcut=lambda *_a: None,
         )
         self.assertEqual(text, "highlighted")
 

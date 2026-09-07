@@ -18,11 +18,25 @@ Pick a bar section when prompted (`right` is the default). Then:
 2. Paste an OpenAI, Anthropic, Gemini, or xAI API key and press Save.
 3. Optionally click **Install Ctrl+Alt+Shift shortcuts**.
 
+## Update
+
+Omarchy updates git-installed plugins in place. There is no separate Fluent
+release artifact for Linux — `main` on this repository *is* the release:
+
+```sh
+omarchy plugin update io.github.alfonsobries.fluent
+```
+
+Source of truth is `omarchy/` in [alfonsobries/fluent-app](https://github.com/alfonsobries/fluent-app). A GitHub Action copies that folder here on every merge to main.
+
+Listed on the marketplace after review: https://github.com/omacom/omarchy-plugin-marketplace/issues/5445
+
 ## Usage
 
-- **Left-click** the bar icon to open or close the panel.
-- Click an action, or press **Enter** on the highlighted row, to rewrite the current selection.
-- **j / k** move. **h / l** walk providers. **e** edits an action, **n** adds one, **k** focuses the API key field. Escape closes.
+- **Left-click** the bar icon to open or close the panel. The panel is for settings: API key, provider, and each action's prompt.
+- Click an action (or press **Enter**) to edit its name, key, prompt, or to disable it. **+** adds a new action.
+- Rewrite happens with the global shortcuts, so the original app keeps focus and the selection can be replaced in place.
+- **j / k** move. **h / l** walk providers. Escape closes.
 - Global shortcuts (after install):
 
 | Shortcut | Action |

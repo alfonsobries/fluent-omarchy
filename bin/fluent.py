@@ -82,6 +82,7 @@ ERRORS = {
 DEFAULT_ACTIONS = [
     {
         "id": "translate",
+        "actionId": "translate",
         "name": "Translate",
         "key": "T",
         "enabled": True,
@@ -92,6 +93,7 @@ DEFAULT_ACTIONS = [
     },
     {
         "id": "improve",
+        "actionId": "improve",
         "name": "Improve writing",
         "key": "O",
         "enabled": True,
@@ -102,6 +104,7 @@ DEFAULT_ACTIONS = [
     },
     {
         "id": "grammar",
+        "actionId": "grammar",
         "name": "Fix grammar",
         "key": "G",
         "enabled": True,
@@ -112,6 +115,7 @@ DEFAULT_ACTIONS = [
     },
     {
         "id": "summarize",
+        "actionId": "summarize",
         "name": "Summarize",
         "key": "S",
         "enabled": True,
@@ -121,6 +125,7 @@ DEFAULT_ACTIONS = [
     },
     {
         "id": "tone",
+        "actionId": "tone",
         "name": "Make professional",
         "key": "P",
         "enabled": True,
@@ -190,12 +195,13 @@ def default_config() -> dict:
 
 
 def _sanitize_action(raw: dict, fallback_id: str) -> dict:
-    action_id = str(raw.get("id") or fallback_id).strip() or fallback_id
+    action_id = str(raw.get("actionId") or raw.get("id") or fallback_id).strip() or fallback_id
     key = str(raw.get("key") or "").strip().upper()
     if len(key) != 1 or not key.isalpha():
         key = ""
     return {
         "id": action_id,
+        "actionId": action_id,
         "name": str(raw.get("name") or action_id).strip() or action_id,
         "key": key,
         "enabled": bool(raw.get("enabled", True)),
@@ -225,7 +231,7 @@ def normalize_config(raw: dict | None) -> dict:
         cfg["models"][pid] = value or meta["model"]
 
     actions = raw.get("actions")
-    if isinstance(actions, list) and actions:
+    if isinstance(actions, list):
         normalized = []
         seen = set()
         for index, item in enumerate(actions):
@@ -234,11 +240,11 @@ def normalize_config(raw: dict | None) -> dict:
             action = _sanitize_action(item, f"action-{index + 1}")
             if action["id"] in seen:
                 action["id"] = f"{action['id']}-{index + 1}"
+                action["actionId"] = action["id"]
             seen.add(action["id"])
             if action["prompt"]:
                 normalized.append(action)
-        if normalized:
-            cfg["actions"] = normalized
+        cfg["actions"] = normalized
 
     chord = str(raw.get("hotkeyChord") or "").strip()
     if chord:
@@ -320,8 +326,10 @@ def public_config(cfg: dict, binds: dict | None = None) -> dict:
 
 def find_action(cfg: dict, action_id: str) -> dict | None:
     needle = str(action_id or "").strip()
+    if not needle:
+        return None
     for action in cfg["actions"]:
-        if action["id"] == needle:
+        if action.get("actionId") == needle or action.get("id") == needle:
             return action
     return None
 
@@ -355,11 +363,13 @@ def upsert_action(cfg: dict, action: dict) -> dict:
 
 def delete_action(cfg: dict, action_id: str) -> dict:
     next_cfg = normalize_config(cfg)
-    remaining = [action for action in next_cfg["actions"] if action["id"] != action_id]
+    remaining = [
+        action
+        for action in next_cfg["actions"]
+        if action.get("actionId") != action_id and action.get("id") != action_id
+    ]
     if len(remaining) == len(next_cfg["actions"]):
         raise FluentError("unknown_action")
-    if not remaining:
-        raise FluentError("unknown_action", "Keep at least one action.")
     next_cfg["actions"] = remaining
     return next_cfg
 
@@ -531,16 +541,16 @@ def wl_paste(primary: bool = False) -> str:
     return completed.stdout or ""
 
 
-def wl_copy(text: str, runner=None) -> None:
-    binary = which("wl-copy")
-    if not binary:
+def wl_copy(text: str, runner=None, binary: str | None = None) -> None:
+    copy_bin = binary or which("wl-copy")
+    if not copy_bin:
         raise FluentError("network_error", "wl-copy is not installed.")
     # Do not capture stdout/stderr: wl-copy daemonizes to serve the clipboard,
     # and holding those pipes makes it hang until our timeout.
     run = runner or subprocess.run
     try:
         completed = run(
-            [binary, "--type", "text/plain"],
+            [copy_bin, "--type", "text/plain"],
             input=text.encode("utf-8"),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -576,13 +586,21 @@ def active_window_is_terminal(fetcher=None) -> bool:
 
 
 def send_shortcut(mods: str, key: str, dispatcher=None) -> None:
-    dispatch = dispatcher or (
-        lambda command: run_command(["hyprctl", "dispatch", "sendshortcut", command], timeout=2)
+    if dispatcher:
+        dispatcher(mods, key)
+        return
+    # Same down/up split Omarchy uses for Super+C/V. wtype merges physically
+    # held modifiers (our Ctrl+Alt+Shift chord) into the injected keys.
+    lua = (
+        "hl.dispatch(hl.dsp.send_key_state({ mods = %s, key = %s, state = \"down\" })); "
+        "hl.timer(function() hl.dispatch(hl.dsp.send_key_state({ mods = %s, key = %s, state = \"up\" })) "
+        "end, { timeout = 50, type = \"oneshot\" })"
+        % (json.dumps(mods), json.dumps(key), json.dumps(mods), json.dumps(key))
     )
-    combo = f"{mods},{key},"
     try:
-        completed = dispatch(combo)
+        completed = run_command(["hyprctl", "eval", lua], timeout=2)
         if completed.returncode == 0:
+            time.sleep(0.07)
             return
     except (OSError, subprocess.TimeoutExpired, FluentError):
         pass
@@ -616,26 +634,28 @@ def paste_shortcut(is_terminal: bool) -> tuple[str, str]:
 
 def capture_selection(
     *,
-    delay: float = 0.12,
+    delay: float = 0.35,
     sleeper=time.sleep,
     paste=wl_paste,
     window_is_terminal=active_window_is_terminal,
     shortcut=send_shortcut,
 ) -> str:
+    # Let the triggering chord (Ctrl+Alt+Shift) come up first. If those keys
+    # are still down, the copy/paste we inject becomes Ctrl+Alt+Shift+C/V and
+    # browsers like Twitter silently ignore it.
     sleeper(delay)
-    primary = (paste(True) or "").strip()
-    if primary:
-        return paste(True)
-
-    original = paste(False)
+    original = paste(False) or ""
     is_terminal = window_is_terminal()
     mods, key = copy_shortcut(is_terminal)
     shortcut(mods, key)
-    sleeper(0.08)
-    copied = paste(False)
-    if copied and copied != original:
+    sleeper(0.12)
+    copied = paste(False) or ""
+    if copied.strip() and copied != original:
         return copied
-    if copied and not original:
+    primary = (paste(True) or "").strip()
+    if primary and primary != original.strip():
+        return paste(True)
+    if copied.strip() and not original.strip():
         return copied
     raise FluentError("no_selection")
 
@@ -643,7 +663,7 @@ def capture_selection(
 def paste_text(
     text: str,
     *,
-    restore_after: float = 0.5,
+    restore_after: float = 0.8,
     sleeper=time.sleep,
     paste=wl_paste,
     copy=wl_copy,
@@ -652,7 +672,7 @@ def paste_text(
 ) -> None:
     original = paste(False)
     copy(text)
-    sleeper(0.05)
+    sleeper(0.08)
     mods, key = paste_shortcut(window_is_terminal())
     shortcut(mods, key)
     if restore_after > 0:
